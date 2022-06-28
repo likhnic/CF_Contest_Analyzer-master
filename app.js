@@ -1,9 +1,10 @@
-
 const express = require("express");
 const path = require("path")
 const bodyParser = require("body-parser");
 const app = express();
+const https = require("https");
 const ejsmate = require("ejs-mate");
+const { start } = require("repl");
 const axios = require('axios').default;
 
 app.engine('ejs', ejsmate)
@@ -11,11 +12,16 @@ app.set('views', path.join(__dirname, 'views'))
 app.set('view engine', 'ejs');
 
 app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname,'public')))
+app.use(express.static(path.join(__dirname, 'public')))
+
 
 app.get("/", (req, res) => {
     res.render("analysis", { display: 0,alert:"" });
 });
+
+app.get("/about",(req,res)=>{
+    res.render("about")
+})
 
 class timeProblem // this is used in storing fastest & slowest submission {time, contestID} so that link can be provided to user
 {
@@ -42,6 +48,11 @@ class ProblemAnalysis {
         this.slowestSubmission.submitTime = 0;
         this.maxRatedProblem = maxRatedProblem;
         this.maxRatedProblem.rating = 0;
+
+        this.cntWA = 0;
+        this.percentTimeSolved = 0;
+        this.accuracy = 0;
+        this.avgTime = 0;
     }
     countWA() {
         return this.cntSubmission - this.cntAC;
@@ -53,7 +64,27 @@ class ProblemAnalysis {
         return (this.cntAC / this.cntSubmission) * 100;
     }
     calculateAvgTime() {
-        return (this.sumSubmitTime / this.cntAC) * 100;
+        return (this.sumSubmitTime / this.cntAC);
+    }
+    updateOtherThings(cntContest) {
+        if(this.cntSubmission == 0)
+        return;
+        this.cntWA = this.countWA();
+        this.percentTimeSolved = this.calculatePercentTimeSolved(cntContest);
+        this.accuracy = this.calculateAccuracy();
+        if(this.cntAC == 0)
+        {
+            this.fastestSubmission.submitTime = -1;
+            this.slowestSubmission.submitTime = -1;
+            this.maxRatedProblem.rating = -1;
+            this.avgTime = 0;
+        }
+        else
+        {
+            this.avgTime = Math.floor(this.calculateAvgTime()/60);
+            this.fastestSubmission.submitTime = Math.floor(this.fastestSubmission.submitTime/60);
+            this.slowestSubmission.submitTime = Math.floor(this.slowestSubmission.submitTime/60);
+        }
     }
 }
 
@@ -65,6 +96,7 @@ class generalStats {
         this.worstRank = worstRank;
         this.worstRank.rating = -Infinity;
         this.averageRank = 0;
+        this.averageProblemSolved = 0;
         this.totalDelta = 0;
         this.maxDelta = maxDelta;
         this.maxDelta.rating = -Infinity;
@@ -72,10 +104,15 @@ class generalStats {
         this.minDelta.rating = Infinity;
     }
 
-    addContest = (rank, delta, contestId) => {
+    addContest = (rank, delta, contestId, cnt) => {
         this.averageRank = (this.averageRank) * (this.totalContests) + rank;
+        this.averageProblemSolved = (this.averageProblemSolved) * (this.totalContests) + cnt;
+        
         this.totalContests++;
         this.averageRank /= this.totalContests;
+        this.averageProblemSolved /= this.totalContests;
+        
+
         this.totalDelta += delta;
         if (this.maxDelta.rating < delta) {
             this.maxDelta.rating = delta;
@@ -128,6 +165,20 @@ function findIndex(index) {
         case "F":
             ans = 5;
             break;
+        case "G":
+            ans = 6;
+            break;
+        case "H":
+            ans = 7;
+            break;
+        case "I":
+            ans = 8;
+            break;
+        case "J":
+            ans = 9;
+            break;
+        deafult :
+            ans = -1;
     }
     return ans;
 }
@@ -137,21 +188,24 @@ function timeAnalysis(result, lowerTime, upperTime, problems) {
         if (submission.creationTimeSeconds >= lowerTime && submission.creationTimeSeconds <= upperTime && submission.author.participantType === "CONTESTANT") {
             const index = submission.problem.index.substring(0, 1);
             const i = findIndex(index);
-            problems[i].cntSubmission += 1;
-            if (submission.verdict === "OK") {
-                problems[i].cntAC++;
-                problems[i].sumSubmitTime += submission.relativeTimeSeconds;
-                if (submission.relativeTimeSeconds < problems[i].fastestSubmission.submitTime) {
-                    problems[i].fastestSubmission.submitTime = submission.relativeTimeSeconds;
-                    problems[i].fastestSubmission.contestID = submission.author.contestId;
-                }
-                if (submission.relativeTimeSeconds > problems[i].slowestSubmission.submitTime) {
-                    problems[i].slowestSubmission.submitTime = submission.relativeTimeSeconds;
-                    problems[i].slowestSubmission.contestID = submission.author.contestId;
-                }
-                if (submission.problem.rating > problems[i].maxRatedProblem.rating) {
-                    problems[i].maxRatedProblem.rating = submission.problem.rating;
-                    problems[i].maxRatedProblem.contestID = submission.author.contestId;
+            if(i >= 0)
+            {
+                problems[i].cntSubmission += 1;
+                if (submission.verdict === "OK") {
+                    problems[i].cntAC++;
+                    problems[i].sumSubmitTime += submission.relativeTimeSeconds;
+                    if (submission.relativeTimeSeconds < problems[i].fastestSubmission.submitTime) {
+                        problems[i].fastestSubmission.submitTime = submission.relativeTimeSeconds;
+                        problems[i].fastestSubmission.contestID = submission.author.contestId;
+                    }
+                    if (submission.relativeTimeSeconds > problems[i].slowestSubmission.submitTime) {
+                        problems[i].slowestSubmission.submitTime = submission.relativeTimeSeconds;
+                        problems[i].slowestSubmission.contestID = submission.author.contestId;
+                    }
+                    if (submission.problem.rating > problems[i].maxRatedProblem.rating) {
+                        problems[i].maxRatedProblem.rating = submission.problem.rating;
+                        problems[i].maxRatedProblem.contestID = submission.author.contestId;
+                    }
                 }
             }
         }
@@ -162,14 +216,21 @@ const generalAnalysis = (result, ratingResult, lowerTime, upperTime, general) =>
 
     let contestIds = new Map();
     result.forEach((submission) => {
-        if (submission.author.participantType === "CONTESTANT" && !contestIds.has(submission.contestId) && submission.author.startTimeSeconds >= lowerTime && submission.author.startTimeSeconds <= upperTime) {
-            contestIds.set(submission.contestId, submission.author.startTimeSeconds);
+        if (submission.author.participantType === "CONTESTANT" && submission.author.startTimeSeconds >= lowerTime && submission.author.startTimeSeconds <= upperTime) {
+            if(!contestIds.has(submission.contestId))
+            contestIds.set(submission.contestId, 0);
+            if(submission.verdict === "OK")
+            {
+                let cnt = contestIds.get(submission.contestId);
+                cnt++;
+                contestIds.set(submission.contestId, cnt);
+            }
         }
     })
-
     ratingResult.forEach((contest) => {
         if (contestIds.has(contest.contestId)) {
-            general.addContest(contest.rank, contest.newRating - contest.oldRating, contest.contestId)
+            let cnt = contestIds.get(contest.contestId);
+            general.addContest(contest.rank, contest.newRating - contest.oldRating, contest.contestId, cnt);
         }
     })
 }
@@ -201,15 +262,23 @@ app.post("/", async (req, res) => {
         let submissionData = await getUser(url);
         let result = submissionData.data.result;
         timeAnalysis(result, startDate, endDate, problems);
-        console.log(problems);
+        // console.log(problems);
     
         let ratingData = await getUser(ratingUrl);
         ratingData = ratingData.data.result
         generalAnalysis(result, ratingData, startDate, endDate, general)
-        // console.log(general)
+        console.log(general)
+        problems.forEach((problem)=>{
+            problem.updateOtherThings(general.totalContests);
+        });
     
         res.render('analysis', { handle, display: 1, problems, general,alert:"" })
     } catch (error) {
+        if(!error || !error.response || !error.response.data || !error.response.data.comment){
+            res.render("analysis", { display: 0, alert:"Internal Server error" });
+            return;
+        }
+        console.log(error)
         let e=error.response.data
         res.render("analysis", { display: 0, alert:e.comment });
     }
